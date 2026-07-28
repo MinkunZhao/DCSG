@@ -4,10 +4,6 @@
 
 This repository contains the implementation of **DCSG** (*Dual Channel Learning Enhanced with Semantic Graph for Recommendation*), a graph-based recommender system that combines collaborative interaction signals with LLM-derived semantic representations of users and items.
 
-The project targets top-k recommendation on the Amazon, Yelp, and Steam datasets. It includes the DCSG implementation built on several collaborative-filtering backbones, data artifacts used by the main experiments, profile-generation examples, and ablation utilities.
-
-> The paper manuscript corresponding to this code is available in the repository root as `_KBS__Dual_Channel_Learning_Enhanced_with_Semantic_Graph_for_Recommendation (3).pdf`.
-
 ## Overview
 
 Collaborative filtering is effective when interaction data are dense, but it can struggle to express semantic relations that are absent from the observed user-item graph. DCSG introduces a semantic channel alongside the collaborative channel:
@@ -17,7 +13,7 @@ Collaborative filtering is effective when interaction data are dense, but it can
 3. **Adaptive fusion.** A feature-wise sigmoid gate learns to combine collaborative and semantic representations for every user and item.
 4. **Joint optimization.** The default DCSG variants optimize BPR ranking loss together with embedding regularization, semantic knowledge distillation, and contrastive consistency. The gate can additionally be supervised by cached LLM-generated labels.
 
-The default main configuration is `lightgcn_dcsg`, which uses LightGCN as the collaborative backbone. DCSG counterparts are also provided for SGL, SimGCL, GCCF, GraphAU, NCL, SGCF, DirectAU, AdaGCL, and AutoCF where corresponding files and configurations are present.
+The main configuration is `lightgcn_dcsg`, with LightGCN as the collaborative backbone. DCSG variants are also provided for SGL, SimGCL, GCCF, GraphAU, NCL, SGCF, DirectAU, AdaGCL, and AutoCF where matching files and configurations are present.
 
 ## Repository Layout
 
@@ -46,11 +42,9 @@ DCSG/
 |   +-- instruction/                # Dataset-specific prompt instructions
 ```
 
-Files outside these paths are not part of the DCSG experimental pipeline.
-
 ## Environment
 
-The code is written in Python and the DCSG implementation currently relies on CUDA tensors internally. Use a CUDA-enabled PyTorch environment for the main experiments.
+The DCSG implementation uses CUDA tensors internally; run the main experiments in a CUDA-enabled PyTorch environment.
 
 Recommended setup:
 
@@ -65,7 +59,7 @@ pip install numpy scipy scikit-learn pyyaml tqdm requests openai matplotlib
 pip install torch-geometric torch-sparse
 ```
 
-`torch-geometric` and `torch-sparse` must match the installed PyTorch and CUDA versions. Please use the installation matrix published by PyTorch Geometric when the simple `pip` installation does not provide a compatible wheel.
+`torch-geometric` and `torch-sparse` must match the installed PyTorch and CUDA versions. Use the PyTorch Geometric installation matrix if `pip` does not provide a compatible wheel.
 
 The optional profile-generation scripts use the legacy `openai` Python client API. They are separate from the default training path and may require a compatible client version or a small API migration for newer SDK releases.
 
@@ -84,13 +78,13 @@ data/{dataset}/
 +-- itm_emb_np.pkl     # Item profile embeddings
 ```
 
-`trn_mat.pkl`, `val_mat.pkl`, and `tst_mat.pkl` must deserialize to matrices with the same shape: `[num_users, num_items]`. The training matrix defines the ID space. Profile embedding rows must align exactly with these user and item indices. The current semantic projection layer expects **1536-dimensional** profile embeddings.
+The three interaction matrices must share the shape `[num_users, num_items]`, which defines the user and item ID space. Profile embedding rows must align with these IDs. The semantic projection layer expects **1536-dimensional** profile embeddings.
 
-The repository already contains the processed artifacts for the three supported datasets. If preparing a new dataset, construct the interaction splits and aligned profile/embedding files in the same format, then add its dataset-specific block to the selected YAML configuration. The current data handler explicitly restricts DCSG loading to Amazon, Yelp, and Steam.
+The repository includes processed artifacts for all supported datasets. To prepare new data, create the same aligned interaction, profile, and embedding files and add a dataset-specific block to the selected YAML configuration. The current data handler accepts only Amazon, Yelp, and Steam.
 
 ### Semantic Graph Construction
 
-At load time, DCSG L2-normalizes user and item profile embeddings, computes user-item cosine similarities, and retains the `sem_graph_topk` highest-scoring items for each user. The retained similarities become weighted edges of the semantic graph. `sem_graph_topk` is configured per dataset in `encoder/config/modelconf/*_dcsg.yml` and is `10` in the supplied main configurations.
+At load time, DCSG L2-normalizes profile embeddings, computes user-item cosine similarities, and retains the `sem_graph_topk` highest-scoring items per user as weighted semantic-graph edges. `sem_graph_topk` is configured per dataset in `encoder/config/modelconf/*_dcsg.yml` and is `10` in the supplied main configurations.
 
 ## Training
 
@@ -105,7 +99,7 @@ python encoder/train_encoder.py \
   --seed 2025
 ```
 
-The `--model` argument selects `encoder/config/modelconf/{model}.yml`; the model is then dynamically loaded from `encoder/models/general_cf/{model}.py`. Useful examples are:
+`--model` selects `encoder/config/modelconf/{model}.yml` and the matching implementation in `encoder/models/general_cf/`. For example:
 
 ```bash
 # Main DCSG model on Yelp
@@ -125,7 +119,7 @@ Important configuration fields are collected in the selected YAML file:
 
 | Field | Meaning |
 | --- | --- |
-| `train.epoch`, `train.batch_size`, `train.patience` | Maximum epochs, mini-batch size, and early-stopping patience |
+| `train.epoch`, `train.batch_size`, `train.patience` | Maximum epochs, batch size, and early-stopping patience |
 | `test.k` | Evaluation cutoffs; supplied DCSG configurations use 5, 10, and 20 |
 | `model.embedding_size` | Collaborative representation dimension |
 | `model.{dataset}.layer_num` | Number of graph propagation layers for that dataset |
@@ -134,11 +128,11 @@ Important configuration fields are collected in the selected YAML file:
 | `contrastive_weight`, `kd_weight` | Weights for consistency and semantic distillation terms |
 | `gate_supervision_weight` | Weight of the optional gate supervision loss |
 
-Training prints validation metrics at each configured `test_step`, performs early stopping using the final Recall cutoff, reloads the best validation checkpoint in memory, and reports final test metrics.
+Training validates every `test_step`, early-stops on the final Recall cutoff, then reports final test metrics using the best validation model.
 
 ## Evaluation and Outputs
 
-The trainer performs all-rank evaluation after training. It masks training interactions before ranking and reports the metrics listed in the YAML configuration, normally Recall@{5,10,20} and NDCG@{5,10,20}.
+The trainer performs all-rank evaluation after training, masks observed training interactions, and reports the YAML metrics, normally Recall@{5,10,20} and NDCG@{5,10,20}.
 
 For a completed run, artifacts are written to:
 
@@ -148,19 +142,19 @@ encoder/log/{model}/{dataset}_{timestamp}.log            # Configuration and met
 candidate.txt                                             # Top-100 item IDs per test user
 ```
 
-The `candidate.txt` output is overwritten by the next run. Preserve or rename it before starting another experiment if it is needed for external analysis.
+`candidate.txt` is overwritten by the next run; rename it before another experiment when it is needed for analysis.
 
 ## Optional LLM-Guided Gate Labels
 
-DCSG can use LLM-generated labels to supervise its fusion gate. The default DCSG configurations set `preprocess_gate_labels: false`, so normal training uses the initialized neutral gate labels and does not make API calls.
+DCSG can use LLM-generated labels to supervise its fusion gate. Default configurations set `preprocess_gate_labels: false`, so normal training uses initialized neutral labels and makes no API calls.
 
-To prepare LLM labels, provide valid user and item profile JSON files, configure the LLM settings locally in the selected YAML file, and set `preprocess_gate_labels: true`. The model will cache labels as `llm_gate_labels_{dataset}.pt` in the process working directory. This preprocessing can be expensive because it queries a model for individual nodes; it is best treated as an offline step.
+To prepare labels, configure the LLM locally, provide valid profile JSON files, and set `preprocess_gate_labels: true`. Labels are cached as `llm_gate_labels_{dataset}.pt` in the working directory. Since preprocessing queries individual nodes, run it offline.
 
 Before enabling this option, verify the profile path used by `LLMGuideManager`: the current implementation resolves profiles through a relative `../data/{dataset}/` path, while the standard training command is run from the repository root. Adjust that path for the local working directory before using LLM label preprocessing.
 
 Do not commit API keys, cached private profiles, or generated labels that are subject to a provider's data-use restrictions.
 
-The scripts under `generation/` show the prompting and embedding workflow used to derive semantic inputs. They are demonstration scripts rather than a dataset-scale end-to-end preprocessing command: adapt their input/output loops when regenerating complete profile corpora.
+The scripts in `generation/` demonstrate profile prompting and embedding. Adapt their input/output loops when regenerating a full profile corpus.
 
 ## Ablations
 
@@ -173,7 +167,7 @@ python encoder/train_encoder.py --model lightgcn --dataset yelp --device cuda --
 python encoder/train_encoder.py --model lightgcn_dcsg --dataset yelp --device cuda --cuda 0
 ```
 
-Additional comparison configurations include `*_wogat_*` and `*_wogate_*` variants. Their exact behavior is defined by the corresponding model files and YAML settings; retain the same dataset split and seed when reporting an ablation.
+Additional `*_wogat_*` and `*_wogate_*` configurations define further comparisons. Keep the data split and seed fixed when reporting an ablation.
 
 ### Topology runner
 
