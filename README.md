@@ -156,41 +156,12 @@ Do not commit API keys, cached private profiles, or generated labels that are su
 
 The scripts in `generation/` demonstrate profile prompting and embedding. Adapt their input/output loops when regenerating a full profile corpus.
 
-## Ablations
-
-### Backbone and component comparisons
-
-Use the relevant configuration and model name to compare DCSG with its backbone:
-
-```bash
-python encoder/train_encoder.py --model lightgcn --dataset yelp --device cuda --cuda 0
-python encoder/train_encoder.py --model lightgcn_dcsg --dataset yelp --device cuda --cuda 0
-```
-
-Additional `*_wogat_*` and `*_wogate_*` configurations define further comparisons. Keep the data split and seed fixed when reporting an ablation.
-
-### Topology runner
-
-`encoder/scripts/run_topology_ablation.py` launches repeated training runs and collects Recall@10 and NDCG@10 into `encoder/experiments/topology_ablation/`:
-
-```bash
-python encoder/scripts/run_topology_ablation.py \
-  --datasets yelp \
-  --topologies user_item \
-  --seeds 2025 \
-  --device cuda \
-  --cuda 0
-```
-
-The current data loader constructs the user-item semantic graph. Although the runner accepts `item_item` and `user_user`, the supplied graph-construction implementation does not yet branch on `semantic_graph_topology`; implement those graph builders before treating those two options as topology ablation results.
-
 ## Reproducibility Notes
 
 - Use `--seed` to override the YAML seed. Set the same seed, model configuration, data artifacts, and CUDA environment when comparing methods.
 - The supplied configuration uses up to 3000 epochs with validation every three epochs and patience five. Early stopping usually ends training earlier.
 - Batch size and evaluation batch size are hardware-dependent. Lower them in the YAML file when GPU memory is limited.
 - Profile embeddings, interaction-ID mappings, and dataset splits are part of the experimental input. Re-generating any of them changes the experiment.
-- CPU execution is not currently supported by the DCSG path because semantic graph and profile tensors use CUDA directly.
 
 ## Citation
 
