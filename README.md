@@ -146,7 +146,7 @@ candidate.txt                                             # Top-100 item IDs per
 
 ## Optional LLM-Guided Gate Labels
 
-DCSG can use LLM-generated labels to supervise its fusion gate. Default configurations set `preprocess_gate_labels: false`, so normal training uses initialized neutral labels and makes no API calls.
+DCSG can use GPT-4o-mini-generated labels to supervise its fusion gate. The prompt returns one number in `[0, 1]`: `0` denotes complete reliance on semantic information and `1` denotes complete reliance on collaborative information. Default configurations set `preprocess_gate_labels: false`, so normal training uses initialized neutral labels and makes no API calls.
 
 To prepare labels, configure the LLM locally, provide valid profile JSON files, and set `preprocess_gate_labels: true`. Labels are cached as `llm_gate_labels_{dataset}.pt` in the working directory. Since preprocessing queries individual nodes, run it offline.
 

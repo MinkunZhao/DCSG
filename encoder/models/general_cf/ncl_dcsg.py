@@ -361,13 +361,13 @@ class NCL_dcsg(BaseModel):
         self.user_centroids, self.user2cluster, _ = self.kmeans(self.user_embeds.detach())
         self.item_centroids, self.item2cluster, _ = self.kmeans(self.item_embeds.detach())
 
-    def forward(self, adj=None, keep_rate=1.0, return_layers=False):
+    def forward(self, adj=None, keep_rate=1.0, return_layers=False, return_channels=False):
         # 处理输入参数
         if adj is None:
             adj = self.adj
 
         # 检查是否需要新的前向传播
-        if not self.is_training and self.final_embeds is not None and not return_layers:
+        if not self.is_training and self.final_embeds is not None and not return_layers and not return_channels:
             return self.final_embeds[:self.user_num], self.final_embeds[self.user_num:], None
 
         # 协同通道
@@ -392,6 +392,15 @@ class NCL_dcsg(BaseModel):
         self.final_embeds = fused_embeds
         self.final_embeds_list = co_embeds_list
 
+        if return_channels:
+            channel_outputs = (
+                co_embeds_sum[:self.user_num], co_embeds_sum[self.user_num:],
+                sem_embeds[:self.user_num], sem_embeds[self.user_num:],
+                fused_embeds[:self.user_num], fused_embeds[self.user_num:],
+            )
+            if return_layers:
+                return (*channel_outputs, co_embeds_list, gate)
+            return (*channel_outputs, gate)
         if return_layers:
             return fused_embeds[:self.user_num], fused_embeds[self.user_num:], co_embeds_list, gate
         else:
@@ -440,7 +449,9 @@ class NCL_dcsg(BaseModel):
             self._cluster()
 
         # 前向传播 - 获取融合嵌入和协同嵌入层
-        user_embeds, item_embeds, co_embeds_list, gate = self.forward(self.adj, self.keep_rate, return_layers=True)
+        user_cf, item_cf, user_sem, item_sem, user_embeds, item_embeds, co_embeds_list, gate = self.forward(
+            self.adj, self.keep_rate, return_layers=True, return_channels=True
+        )
 
         # 获取ego和context嵌入（用于NCL原始的结构对比损失）
         ego_embeds = co_embeds_list[0]
@@ -451,19 +462,18 @@ class NCL_dcsg(BaseModel):
         proto_loss = self._cal_proto_loss(ego_embeds, ancs, poss) * self.proto_weight
 
         # 按相同方式获取融合嵌入，进行协同图渠道前向传播
-        user_embeds_struct, item_embeds_struct, gate_struct = self.forward(self.adj, self.keep_rate)
+        cf_embeds = t.cat([user_cf, item_cf], dim=0)
+        sem_embeds = t.cat([user_sem, item_sem], dim=0)
+        fused_embeds = t.cat([user_embeds, item_embeds], dim=0)
+        node_ids = t.cat([ancs, poss + self.user_num, negs + self.user_num])
         # 再进行一次传播获取语义嵌入
-        user_embeds_sem, item_embeds_sem, gate_sem = self.forward(self.adj, 1.0)
 
         # 获取当前批次的嵌入
-        anc_embeds_struct, pos_embeds_struct, _ = self._pick_embeds(user_embeds_struct, item_embeds_struct,
-                                                                    batch_data[:3])
-        anc_embeds_sem, pos_embeds_sem, _ = self._pick_embeds(user_embeds_sem, item_embeds_sem, batch_data[:3])
 
         # 计算对比损失（结构和语义之间的对比）
-        user_contrast_loss = cal_infonce_loss(anc_embeds_struct, anc_embeds_sem, anc_embeds_sem, self.contrast_temp)
-        item_contrast_loss = cal_infonce_loss(pos_embeds_struct, pos_embeds_sem, pos_embeds_sem, self.contrast_temp)
-        contrast_loss = (user_contrast_loss + item_contrast_loss) * self.contrast_weight
+        contrast_loss = self.contrast_weight * cal_infonce_loss(
+            cf_embeds[node_ids], sem_embeds[node_ids], sem_embeds, self.contrast_temp
+        ) / node_ids.shape[0]
 
         # 获取最终预测用的嵌入
         anc_embeds, pos_embeds, neg_embeds = self._pick_embeds(user_embeds, item_embeds, batch_data[:3])
@@ -480,14 +490,9 @@ class NCL_dcsg(BaseModel):
         )
 
         # 知识蒸馏损失
-        usrprf_embeds = self.semantic_mlp(self.usrprf_embeds)
-        itmprf_embeds = self.semantic_mlp(self.itmprf_embeds)
-        ancprf_embeds, posprf_embeds, negprf_embeds = self._pick_embeds(usrprf_embeds, itmprf_embeds, batch_data[:3])
-        kd_loss = cal_infonce_loss(anc_embeds, ancprf_embeds, usrprf_embeds, self.kd_temperature) + \
-                  cal_infonce_loss(pos_embeds, posprf_embeds, posprf_embeds, self.kd_temperature) + \
-                  cal_infonce_loss(neg_embeds, negprf_embeds, negprf_embeds, self.kd_temperature)
-        kd_loss /= anc_embeds.shape[0]
-        kd_loss *= self.kd_weight
+        kd_loss = self.kd_weight * cal_infonce_loss(
+            fused_embeds[node_ids], sem_embeds[node_ids], sem_embeds, self.kd_temperature
+        ) / node_ids.shape[0]
 
         # 门控监督损失
         gate_labels = self.llm_guide.gate_labels

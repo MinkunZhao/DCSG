@@ -333,7 +333,7 @@ class DirectAU_dcsg(BaseModel):
             embeds = F.leaky_relu(embeds)
         return embeds
 
-    def forward(self, keep_rate=1.0):
+    def forward(self, keep_rate=1.0, return_channels=False):
         # 协同通道
         co_embeds = t.cat([self.user_embeds, self.item_embeds], 0)
         # 应用edge dropping
@@ -355,6 +355,12 @@ class DirectAU_dcsg(BaseModel):
         # 存储最终嵌入用于预测
         self.final_embeds = fused_embeds
 
+        if return_channels:
+            return (
+                co_embeds[:self.user_num], co_embeds[self.user_num:],
+                sem_embeds[:self.user_num], sem_embeds[self.user_num:],
+                fused_embeds[:self.user_num], fused_embeds[self.user_num:], gate,
+            )
         return fused_embeds[:self.user_num], fused_embeds[self.user_num:], gate
 
     def _pick_embeds(self, user_embeds, item_embeds, batch_data):
@@ -366,23 +372,20 @@ class DirectAU_dcsg(BaseModel):
 
     def cal_loss(self, batch_data):
         self.is_training = True
-        # 结构图前向传播
-        user_embeds_struct, item_embeds_struct, gate_struct = self.forward(self.keep_rate)
-        # 语义图前向传播
-        user_embeds_sem, item_embeds_sem, gate_sem = self.forward(1.0)
-
-        # 提取当前batch的嵌入
         ancs, poss, negs = batch_data
-        anc_embeds_struct, pos_embeds_struct, _ = self._pick_embeds(user_embeds_struct, item_embeds_struct, batch_data)
-        anc_embeds_sem, pos_embeds_sem, _ = self._pick_embeds(user_embeds_sem, item_embeds_sem, batch_data)
-
-        # 计算对比损失（用户和正物品）
-        user_contrast_loss = cal_infonce_loss(anc_embeds_struct, anc_embeds_sem, anc_embeds_sem, self.contrast_temp)
-        item_contrast_loss = cal_infonce_loss(pos_embeds_struct, pos_embeds_sem, pos_embeds_sem, self.contrast_temp)
-        contrast_loss = (user_contrast_loss + item_contrast_loss) * self.contrast_weight
-
-        # 获取最终嵌入
-        user_embeds, item_embeds, gate = self.forward(self.keep_rate)
+        user_cf, item_cf, user_sem, item_sem, user_embeds, item_embeds, gate = self.forward(
+            self.keep_rate, return_channels=True
+        )
+        cf_embeds = t.cat([user_cf, item_cf], dim=0)
+        sem_embeds = t.cat([user_sem, item_sem], dim=0)
+        fused_embeds = t.cat([user_embeds, item_embeds], dim=0)
+        node_ids = t.cat([ancs, poss + self.user_num, negs + self.user_num])
+        contrast_loss = self.contrast_weight * cal_infonce_loss(
+            cf_embeds[node_ids], sem_embeds[node_ids], sem_embeds, self.contrast_temp
+        ) / node_ids.shape[0]
+        kd_loss = self.hyper_config['kd_weight'] * cal_infonce_loss(
+            fused_embeds[node_ids], sem_embeds[node_ids], sem_embeds, self.contrast_temp
+        ) / node_ids.shape[0]
         anc_embeds = user_embeds[ancs]
         pos_embeds = item_embeds[poss]
 
@@ -390,17 +393,6 @@ class DirectAU_dcsg(BaseModel):
         align_loss = alignment(anc_embeds, pos_embeds)
         uniform_loss = self.gamma * (uniformity(anc_embeds) + uniformity(pos_embeds)) / 2
         directau_loss = align_loss + uniform_loss
-
-        # 用户画像嵌入
-        usrprf_embeds = self.semantic_mlp(self.usrprf_embeds)
-        itmprf_embeds = self.semantic_mlp(self.itmprf_embeds)
-        ancprf_embeds, posprf_embeds, _ = self._pick_embeds(usrprf_embeds, itmprf_embeds, batch_data)
-
-        # 知识蒸馏损失
-        kd_loss = cal_infonce_loss(anc_embeds, ancprf_embeds, usrprf_embeds, self.contrast_temp) + \
-                  cal_infonce_loss(pos_embeds, posprf_embeds, posprf_embeds, self.contrast_temp)
-        kd_loss /= anc_embeds.shape[0]
-        kd_loss *= self.hyper_config['kd_weight']
 
         # 门控监督损失
         gate_labels = self.llm_guide.gate_labels

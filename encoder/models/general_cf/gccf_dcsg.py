@@ -344,7 +344,7 @@ class GCCF_dcsg(BaseModel):
             embeds = F.leaky_relu(embeds)
         return embeds
 
-    def forward(self, keep_rate=1.0):
+    def forward(self, keep_rate=1.0, return_channels=False):
         # 协同通道
         co_embeds = t.cat([self.user_embeds, self.item_embeds], 0)
         dropped_adj = self.edge_dropper(self.adj, keep_rate)
@@ -363,6 +363,12 @@ class GCCF_dcsg(BaseModel):
         fused_embeds = gate * co_embeds + (1 - gate) * sem_embeds
 
         # 修改返回值，添加gate
+        if return_channels:
+            return (
+                co_embeds[:self.user_num], co_embeds[self.user_num:],
+                sem_embeds[:self.user_num], sem_embeds[self.user_num:],
+                fused_embeds[:self.user_num], fused_embeds[self.user_num:], gate,
+            )
         return fused_embeds[:self.user_num], fused_embeds[self.user_num:], gate
 
     def _pick_embeds(self, user_embeds, item_embeds, batch_data):
@@ -374,22 +380,21 @@ class GCCF_dcsg(BaseModel):
 
     def cal_loss(self, batch_data):
         self.is_training = True
-        # 结构图前向传播
-        user_embeds_struct, item_embeds_struct, gate_struct = self.forward(self.keep_rate)
-        # 语义图前向传播
-        user_embeds_sem, item_embeds_sem, gate_sem = self.forward(1.0)
-
-        # 提取当前batch的嵌入
-        anc_embeds_struct, pos_embeds_struct, _ = self._pick_embeds(user_embeds_struct, item_embeds_struct, batch_data)
-        anc_embeds_sem, pos_embeds_sem, _ = self._pick_embeds(user_embeds_sem, item_embeds_sem, batch_data)
-
-        # 计算对比损失
-        user_contrast_loss = cal_infonce_loss(anc_embeds_struct, anc_embeds_sem, anc_embeds_sem, self.contrast_temp)
-        item_contrast_loss = cal_infonce_loss(pos_embeds_struct, pos_embeds_sem, pos_embeds_sem, self.contrast_temp)
-        contrast_loss = (user_contrast_loss + item_contrast_loss) * self.contrast_weight
-
-        user_embeds, item_embeds, gate = self.forward(self.keep_rate)
+        user_cf, item_cf, user_sem, item_sem, user_embeds, item_embeds, gate = self.forward(
+            self.keep_rate, return_channels=True
+        )
         anc, pos, neg = batch_data
+
+        cf_embeds = t.cat([user_cf, item_cf], dim=0)
+        sem_embeds = t.cat([user_sem, item_sem], dim=0)
+        fused_embeds = t.cat([user_embeds, item_embeds], dim=0)
+        node_ids = t.cat([anc, pos + self.user_num, neg + self.user_num])
+        contrast_loss = self.contrast_weight * cal_infonce_loss(
+            cf_embeds[node_ids], sem_embeds[node_ids], sem_embeds, self.contrast_temp
+        ) / node_ids.shape[0]
+        kd_loss = self.kd_weight * cal_infonce_loss(
+            fused_embeds[node_ids], sem_embeds[node_ids], sem_embeds, self.kd_temperature
+        ) / node_ids.shape[0]
 
         # BPR损失
         anc_embeds = user_embeds[anc]
@@ -405,16 +410,6 @@ class GCCF_dcsg(BaseModel):
                 sum(t.norm(p) for p in self.gat_layers.parameters()) +
                 sum(t.norm(p) for p in self.gcnLayers.parameters())  # 添加GCN层的正则化
         )
-
-        usrprf_embeds = self.semantic_mlp(self.usrprf_embeds)
-        itmprf_embeds = self.semantic_mlp(self.itmprf_embeds)
-        ancprf_embeds, posprf_embeds, negprf_embeds = self._pick_embeds(usrprf_embeds, itmprf_embeds, batch_data)
-
-        kd_loss = cal_infonce_loss(anc_embeds, ancprf_embeds, usrprf_embeds, self.kd_temperature) + \
-                  cal_infonce_loss(pos_embeds, posprf_embeds, posprf_embeds, self.kd_temperature) + \
-                  cal_infonce_loss(neg_embeds, negprf_embeds, negprf_embeds, self.kd_temperature)
-        kd_loss /= anc_embeds.shape[0]
-        kd_loss *= self.kd_weight
 
         # 新增：门控监督损失
         gate_labels = self.llm_guide.gate_labels
